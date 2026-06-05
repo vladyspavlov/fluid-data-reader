@@ -1,0 +1,13 @@
+[
+  {
+    "inputs": [
+      { "internalType": "address", "name": "owner_", "type": "address" }
+    ],
+    "name": "getUserNfts",
+    "outputs": [
+      { "internalType": "uint256[]", "name": "nftIds_", "type": "uint256[]" }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  }
+]

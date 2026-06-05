@@ -1,0 +1,30 @@
+[
+  {
+    "inputs": [
+      { "internalType": "uint256[]", "name": "nftIds_", "type": "uint256[]" }
+    ],
+    "name": "getPositionsForNftIds",
+    "outputs": [
+      {
+        "components": [
+          { "internalType": "uint256", "name": "nftId", "type": "uint256" },
+          { "internalType": "address", "name": "vault", "type": "address" },
+          { "internalType": "address", "name": "owner", "type": "address" },
+          { "internalType": "bool", "name": "isLiquidatable", "type": "bool" },
+          { "internalType": "bool", "name": "isSupplyPosition", "type": "bool" },
+          { "internalType": "uint256", "name": "tick", "type": "uint256" },
+          { "internalType": "uint256", "name": "tickId", "type": "uint256" },
+          { "internalType": "uint256", "name": "col", "type": "uint256" },
+          { "internalType": "uint256", "name": "debt", "type": "uint256" },
+          { "internalType": "uint256", "name": "colUnderlying", "type": "uint256" },
+          { "internalType": "uint256", "name": "debtUnderlying", "type": "uint256" }
+        ],
+        "internalType": "struct IFluidVaultPositionsResolver.UserPosition[]",
+        "name": "userPositions_",
+        "type": "tuple[]"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  }
+]

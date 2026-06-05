@@ -1,0 +1,36 @@
+services:
+  fluid-service:
+    build: .
+    container_name: fluid-reader
+    ports:
+      - "3000:3000"
+    environment:
+      # --- Required: set these before running docker compose up ---
+      BASE_RPC_URL: ${BASE_RPC_URL}
+      COINGECKO_API_KEY: ${COINGECKO_API_KEY:-}
+
+      # --- Defaults: no changes needed ---
+      PORT: "3000"
+      LOG_LEVEL: "info"
+      CACHE_TTL_SECONDS: "60"
+
+      # Fluid contract addresses on Base (verified from fluid-deployments)
+      FLUID_VAULT_RESOLVER: "0x1500D70D8551B828f8fb56fa739c977D113444Df"
+      FLUID_VAULT_POSITIONS_RESOLVER: "0x91214D70b3981276Ff3b8361552D99BA41C41A7d"
+      FLUID_VAULT_FACTORY: "0x324c5Dc1fC42c7a4D43d92df1eBA58a54d13Bf2d"
+
+      # Token addresses on Base
+      TOKEN_CBBTC: "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"
+      TOKEN_WSTETH: "0xc1CBa3fCea344f92D9239c08C0568f6F2F0ee452"
+      TOKEN_USDC: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
