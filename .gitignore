@@ -1,4 +1,12 @@
 node_modules/
 dist/
-.env
 *.log
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Dot files and folders
+.*
+!.gitignore
