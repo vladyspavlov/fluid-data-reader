@@ -208,56 +208,51 @@ export class FluidService {
   }
 
   // Resolve which vault contract each NFT belongs to.
-  // Uses nftVaultMap cache; on miss, builds the full map from all vault NFT lists.
+  // Checks cache first; on miss, searches all vaults sequentially stopping early.
   private async resolveVaultAddresses(nftIds: readonly bigint[]): Promise<(Address | null)[]> {
     const missing = nftIds.filter((id) => !this.nftVaultMap.has(id.toString()));
-
     if (missing.length > 0) {
-      await this.buildNftVaultMap();
+      await this.findVaultsForNfts(new Set(missing.map((id) => id.toString())));
     }
-
     return nftIds.map((id) => this.nftVaultMap.get(id.toString()));
   }
 
-  private async buildNftVaultMap(): Promise<void> {
+  // Searches vaults one at a time (to avoid multicall response-size limits on large vaults).
+  // Stops early once all target NFTs are found.
+  private async findVaultsForNfts(targetNftIds: Set<string>): Promise<void> {
     const totalVaults = (await this.client.readContract({
       address: contracts.vaultFactory,
       abi: FluidVaultFactoryAbi as Abi,
       functionName: 'totalVaults',
     })) as bigint;
 
-    const vaultIds = Array.from({ length: Number(totalVaults) }, (_, i) => BigInt(i + 1));
+    const remaining = new Set(targetNftIds);
 
-    const vaultAddresses = await Promise.all(
-      vaultIds.map((id) =>
-        this.client.readContract({
-          address: contracts.vaultFactory,
-          abi: FluidVaultFactoryAbi as Abi,
-          functionName: 'getVaultAddress',
-          args: [id],
-        }) as Promise<Address>,
-      ),
-    );
+    for (let vaultId = 1n; vaultId <= totalVaults && remaining.size > 0; vaultId++) {
+      const vault = (await this.client.readContract({
+        address: contracts.vaultFactory,
+        abi: FluidVaultFactoryAbi as Abi,
+        functionName: 'getVaultAddress',
+        args: [vaultId],
+      })) as Address;
 
-    const allNftIdLists = await Promise.all(
-      vaultAddresses.map((vault) =>
-        (this.client.readContract({
-          address: contracts.vaultPositionsResolver,
-          abi: FluidVaultPositionsResolverAbi as Abi,
-          functionName: 'getAllVaultNftIds',
-          args: [vault],
-        }) as Promise<bigint[]>).catch(() => [] as bigint[]),
-      ),
-    );
+      const nftIds = await (this.client.readContract({
+        address: contracts.vaultPositionsResolver,
+        abi: FluidVaultPositionsResolverAbi as Abi,
+        functionName: 'getAllVaultNftIds',
+        args: [vault],
+      }) as Promise<bigint[]>).catch(() => [] as bigint[]);
 
-    allNftIdLists.forEach((nftIds, i) => {
-      const vault = vaultAddresses[i];
       for (const nftId of nftIds) {
-        this.nftVaultMap.set(nftId.toString(), vault);
+        const key = nftId.toString();
+        this.nftVaultMap.set(key, vault);
+        remaining.delete(key);
       }
-    });
+    }
 
-    console.info(`[FluidService] nftVaultMap built: ${vaultAddresses.length} vaults`);
+    if (remaining.size > 0) {
+      console.warn(`[FluidService] could not find vault for NFTs: ${[...remaining].join(', ')}`);
+    }
   }
 
   private async getVaultDataMap(vaultAddresses: Address[]): Promise<Map<string, VaultData>> {
