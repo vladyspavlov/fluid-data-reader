@@ -32,5 +32,16 @@
     ],
     "stateMutability": "view",
     "type": "function"
+  },
+  {
+    "inputs": [
+      { "internalType": "uint256", "name": "nftId_", "type": "uint256" }
+    ],
+    "name": "getVaultAddress",
+    "outputs": [
+      { "internalType": "address", "name": "vault_", "type": "address" }
+    ],
+    "stateMutability": "view",
+    "type": "function"
   }
 ]

@@ -1,7 +1,7 @@
 import { createPublicClient, http, formatUnits, type Address, type Abi } from 'viem';
 import { base } from 'viem/chains';
 import { contracts } from '../config/contracts.js';
-import { rawToActual, rateToDecimal, configToDecimal, computeHealthFactor } from '../utils/conversion.js';
+import { rateToDecimal, configToDecimal, computeHealthFactor } from '../utils/conversion.js';
 import { CacheService } from './CacheService.js';
 import { PriceService, type Prices } from './PriceService.js';
 import { config } from '../config/contracts.js';
@@ -42,18 +42,12 @@ interface VaultData {
   };
 }
 
+// Actual 4-field struct returned by getPositionsForNftIds (verified from raw eth_call)
 type UserPosition = {
   nftId: bigint;
-  vault: string;
   owner: string;
-  isLiquidatable: boolean;
-  isSupplyPosition: boolean;
-  tick: bigint;
-  tickId: bigint;
-  col: bigint;
-  debt: bigint;
-  colUnderlying: bigint;
-  debtUnderlying: bigint;
+  col: bigint;   // underlying collateral amount (native token units)
+  debt: bigint;  // underlying debt amount (native token units)
 };
 
 export interface PositionResponse {
@@ -146,16 +140,18 @@ export class FluidService {
       return this.buildEmptyResponse(address, prices);
     }
 
-    const [userPositions, prices] = await Promise.all([
+    // Fetch positions, vault addresses per nftId, and prices in parallel
+    const [userPositions, vaultAddresses, prices] = await Promise.all([
       this.getUserPositions(nftIds),
+      this.getVaultAddresses(nftIds),
       this.priceService.getPrices(),
     ]);
 
-    const vaultAddresses = [...new Set(userPositions.map((p) => p.vault as Address))];
-    const vaultDataMap = await this.getVaultDataMap(vaultAddresses);
+    const uniqueVaults = [...new Set(vaultAddresses)];
+    const vaultDataMap = await this.getVaultDataMap(uniqueVaults);
 
     const positions = await Promise.all(
-      userPositions.map((pos) => this.buildPosition(pos, vaultDataMap, prices)),
+      userPositions.map((pos, i) => this.buildPosition(pos, vaultAddresses[i], vaultDataMap, prices)),
     );
 
     return {
@@ -218,6 +214,19 @@ export class FluidService {
     })) as UserPosition[];
   }
 
+  private async getVaultAddresses(nftIds: readonly bigint[]): Promise<Address[]> {
+    return Promise.all(
+      nftIds.map((nftId) =>
+        this.client.readContract({
+          address: contracts.vaultFactory,
+          abi: FluidVaultFactoryAbi as Abi,
+          functionName: 'getVaultAddress',
+          args: [nftId],
+        }) as Promise<Address>,
+      ),
+    );
+  }
+
   private async getVaultDataMap(vaultAddresses: Address[]): Promise<Map<string, VaultData>> {
     // Promise.all batches into a single multicall because client is configured with batch.multicall
     const results = await Promise.all(
@@ -255,11 +264,12 @@ export class FluidService {
 
   private async buildPosition(
     pos: UserPosition,
+    vault: Address,
     vaultDataMap: Map<string, VaultData>,
     prices: Prices | null,
   ): Promise<Position> {
-    const vaultData = vaultDataMap.get(pos.vault.toLowerCase());
-    if (!vaultData) throw new Error(`No vault data for ${pos.vault}`);
+    const vaultData = vaultDataMap.get(vault.toLowerCase());
+    if (!vaultData) throw new Error(`No vault data for ${vault}`);
 
     const colTokenAddress = vaultData.constantVariables.supply !== ZERO_ADDRESS
       ? vaultData.constantVariables.supply
@@ -274,13 +284,9 @@ export class FluidService {
       this.getTokenMeta(debtTokenAddress),
     ]);
 
-    const actualCol = pos.colUnderlying > 0n
-      ? pos.colUnderlying
-      : rawToActual(pos.col, vaultData.exchangePricesAndRates.vaultSupplyExchangePrice);
-
-    const actualDebt = pos.debtUnderlying > 0n
-      ? pos.debtUnderlying
-      : rawToActual(pos.debt, vaultData.exchangePricesAndRates.vaultBorrowExchangePrice);
+    // col and debt from the resolver are already underlying (actual) amounts
+    const actualCol = pos.col;
+    const actualDebt = pos.debt;
 
     const colAmountStr = formatUnits(actualCol, colMeta.decimals);
     const debtAmountStr = formatUnits(actualDebt, debtMeta.decimals);
@@ -315,7 +321,7 @@ export class FluidService {
 
     return {
       nftId: pos.nftId.toString(),
-      vault: pos.vault,
+      vault,
       collateral: {
         token: colMeta.symbol,
         tokenAddress: colTokenAddress,
@@ -341,7 +347,7 @@ export class FluidService {
         collateralFactor,
         liquidationThreshold,
         healthFactor: isFinite(healthFactor) ? healthFactor : 999,
-        isLiquidatable: pos.isLiquidatable || (isFinite(healthFactor) && healthFactor < 1.0),
+        isLiquidatable: isFinite(healthFactor) && healthFactor < 1.0,
       },
       netValueUSD,
       netValueETH: netValueUSD !== null && ETH_USD ? netValueUSD / ETH_USD : null,
