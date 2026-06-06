@@ -182,20 +182,31 @@ export class FluidService {
     }
   }
 
-  private async getNftIdsFallback(_address: Address): Promise<readonly bigint[]> {
-    // Fallback: read all positions with empty nftIds — only works if resolver supports it
-    // If this also fails the caller returns empty positions (handled upstream)
-    try {
-      const positions = (await this.client.readContract({
-        address: contracts.vaultPositionsResolver,
-        abi: FluidVaultPositionsResolverAbi as Abi,
-        functionName: 'getPositionsForNftIds',
-        args: [[]],
-      })) as UserPosition[];
-      return positions.map((p) => p.nftId);
-    } catch {
-      return [];
-    }
+  private async getNftIdsFallback(address: Address): Promise<readonly bigint[]> {
+    // Fallback: ERC721 enumerable — balanceOf + tokenOfOwnerByIndex
+    const balance = (await this.client.readContract({
+      address: contracts.vaultFactory,
+      abi: FluidVaultFactoryAbi as Abi,
+      functionName: 'balanceOf',
+      args: [address],
+    })) as bigint;
+
+    if (balance === 0n) return [];
+
+    const indices = Array.from({ length: Number(balance) }, (_, i) => BigInt(i));
+    const nftIds = await Promise.all(
+      indices.map((index) =>
+        this.client.readContract({
+          address: contracts.vaultFactory,
+          abi: FluidVaultFactoryAbi as Abi,
+          functionName: 'tokenOfOwnerByIndex',
+          args: [address, index],
+        }) as Promise<bigint>,
+      ),
+    );
+
+    console.info(`[FluidService] ERC721 fallback found ${nftIds.length} NFTs for ${address}`);
+    return nftIds;
   }
 
   private async getUserPositions(nftIds: readonly bigint[]): Promise<UserPosition[]> {
