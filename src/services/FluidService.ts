@@ -10,8 +10,6 @@ import FluidVaultFactoryAbi from '../abi/FluidVaultFactory.json' with { type: 'j
 import FluidVaultPositionsResolverAbi from '../abi/FluidVaultPositionsResolver.json' with { type: 'json' };
 import FluidVaultResolverAbi from '../abi/FluidVaultResolver.json' with { type: 'json' };
 
-const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000' as Address;
-
 const ERC20_ABI = [
   { name: 'decimals', type: 'function', stateMutability: 'view', inputs: [], outputs: [{ name: '', type: 'uint8' }] },
   { name: 'symbol', type: 'function', stateMutability: 'view', inputs: [], outputs: [{ name: '', type: 'string' }] },
@@ -35,19 +33,16 @@ interface VaultData {
     oraclePriceOperate: bigint;
   };
   exchangePricesAndRates: {
-    vaultSupplyExchangePrice: bigint;
-    vaultBorrowExchangePrice: bigint;
     supplyRateVault: bigint;
     borrowRateVault: bigint;
   };
 }
 
-// Actual 4-field struct returned by getPositionsForNftIds (verified from raw eth_call)
 type UserPosition = {
   nftId: bigint;
   owner: string;
-  col: bigint;   // underlying collateral amount (native token units)
-  debt: bigint;  // underlying debt amount (native token units)
+  col: bigint;
+  debt: bigint;
 };
 
 export interface PositionResponse {
@@ -117,6 +112,8 @@ export class FluidService {
   private readonly cache = new CacheService<PositionResponse>(config.cacheTtlSeconds);
   private readonly priceService = new PriceService();
   private readonly tokenMetaCache = new Map<Address, TokenMeta>();
+  // nftId (as string) → vault address; refreshed alongside position cache
+  private readonly nftVaultMap = new CacheService<Address>(config.cacheTtlSeconds);
 
   async getPositions(address: Address): Promise<PositionResponse> {
     const cacheKey = address.toLowerCase();
@@ -140,14 +137,13 @@ export class FluidService {
       return this.buildEmptyResponse(address, prices);
     }
 
-    // Fetch positions, vault addresses per nftId, and prices in parallel
     const [userPositions, vaultAddresses, prices] = await Promise.all([
       this.getUserPositions(nftIds),
-      this.getVaultAddresses(nftIds),
+      this.resolveVaultAddresses(nftIds),
       this.priceService.getPrices(),
     ]);
 
-    const uniqueVaults = [...new Set(vaultAddresses)];
+    const uniqueVaults = [...new Set(vaultAddresses.filter(Boolean))] as Address[];
     const vaultDataMap = await this.getVaultDataMap(uniqueVaults);
 
     const positions = await Promise.all(
@@ -158,8 +154,8 @@ export class FluidService {
       address,
       chain: 'base',
       timestamp: new Date().toISOString(),
-      positions,
-      summary: this.buildSummary(positions, prices),
+      positions: positions.filter(Boolean) as Position[],
+      summary: this.buildSummary(positions.filter(Boolean) as Position[], prices),
       prices,
     };
   }
@@ -172,14 +168,12 @@ export class FluidService {
         functionName: 'getUserNfts',
         args: [address],
       })) as bigint[];
-    } catch (err) {
-      console.error('[FluidService] getUserNfts failed, trying fallback:', err);
+    } catch {
       return this.getNftIdsFallback(address);
     }
   }
 
   private async getNftIdsFallback(address: Address): Promise<readonly bigint[]> {
-    // Fallback: ERC721 enumerable — balanceOf + tokenOfOwnerByIndex
     const balance = (await this.client.readContract({
       address: contracts.vaultFactory,
       abi: FluidVaultFactoryAbi as Abi,
@@ -189,14 +183,13 @@ export class FluidService {
 
     if (balance === 0n) return [];
 
-    const indices = Array.from({ length: Number(balance) }, (_, i) => BigInt(i));
     const nftIds = await Promise.all(
-      indices.map((index) =>
+      Array.from({ length: Number(balance) }, (_, i) =>
         this.client.readContract({
           address: contracts.vaultFactory,
           abi: FluidVaultFactoryAbi as Abi,
           functionName: 'tokenOfOwnerByIndex',
-          args: [address, index],
+          args: [address, BigInt(i)],
         }) as Promise<bigint>,
       ),
     );
@@ -214,21 +207,60 @@ export class FluidService {
     })) as UserPosition[];
   }
 
-  private async getVaultAddresses(nftIds: readonly bigint[]): Promise<Address[]> {
-    return Promise.all(
-      nftIds.map((nftId) =>
+  // Resolve which vault contract each NFT belongs to.
+  // Uses nftVaultMap cache; on miss, builds the full map from all vault NFT lists.
+  private async resolveVaultAddresses(nftIds: readonly bigint[]): Promise<(Address | null)[]> {
+    const missing = nftIds.filter((id) => !this.nftVaultMap.has(id.toString()));
+
+    if (missing.length > 0) {
+      await this.buildNftVaultMap();
+    }
+
+    return nftIds.map((id) => this.nftVaultMap.get(id.toString()));
+  }
+
+  private async buildNftVaultMap(): Promise<void> {
+    const totalVaults = (await this.client.readContract({
+      address: contracts.vaultFactory,
+      abi: FluidVaultFactoryAbi as Abi,
+      functionName: 'totalVaults',
+    })) as bigint;
+
+    const vaultIds = Array.from({ length: Number(totalVaults) }, (_, i) => BigInt(i + 1));
+
+    const vaultAddresses = await Promise.all(
+      vaultIds.map((id) =>
         this.client.readContract({
           address: contracts.vaultFactory,
           abi: FluidVaultFactoryAbi as Abi,
           functionName: 'getVaultAddress',
-          args: [nftId],
+          args: [id],
         }) as Promise<Address>,
       ),
     );
+
+    const allNftIdLists = await Promise.all(
+      vaultAddresses.map((vault) =>
+        (this.client.readContract({
+          address: contracts.vaultPositionsResolver,
+          abi: FluidVaultPositionsResolverAbi as Abi,
+          functionName: 'getAllVaultNftIds',
+          args: [vault],
+        }) as Promise<bigint[]>).catch(() => [] as bigint[]),
+      ),
+    );
+
+    allNftIdLists.forEach((nftIds, i) => {
+      const vault = vaultAddresses[i];
+      for (const nftId of nftIds) {
+        this.nftVaultMap.set(nftId.toString(), vault);
+      }
+    });
+
+    console.info(`[FluidService] nftVaultMap built: ${vaultAddresses.length} vaults`);
   }
 
   private async getVaultDataMap(vaultAddresses: Address[]): Promise<Map<string, VaultData>> {
-    // Promise.all batches into a single multicall because client is configured with batch.multicall
     const results = await Promise.all(
       vaultAddresses.map((vault) =>
         this.client.readContract({
@@ -264,32 +296,33 @@ export class FluidService {
 
   private async buildPosition(
     pos: UserPosition,
-    vault: Address,
+    vault: Address | null,
     vaultDataMap: Map<string, VaultData>,
     prices: Prices | null,
-  ): Promise<Position> {
+  ): Promise<Position | null> {
+    if (!vault) {
+      console.warn(`[FluidService] no vault found for NFT ${pos.nftId}`);
+      return null;
+    }
+
     const vaultData = vaultDataMap.get(vault.toLowerCase());
-    if (!vaultData) throw new Error(`No vault data for ${vault}`);
+    if (!vaultData) {
+      console.warn(`[FluidService] no vault data for vault ${vault}`);
+      return null;
+    }
 
-    const colTokenAddress = vaultData.constantVariables.supply !== ZERO_ADDRESS
-      ? vaultData.constantVariables.supply
-      : vaultData.constantVariables.supplyToken.token0;
-
-    const debtTokenAddress = vaultData.constantVariables.borrow !== ZERO_ADDRESS
-      ? vaultData.constantVariables.borrow
-      : vaultData.constantVariables.borrowToken.token0;
+    // supplyToken.token0 is always the collateral token (supply/borrow fields are internal liquidity refs)
+    const colTokenAddress = vaultData.constantVariables.supplyToken.token0;
+    const debtTokenAddress = vaultData.constantVariables.borrowToken.token0;
 
     const [colMeta, debtMeta] = await Promise.all([
       this.getTokenMeta(colTokenAddress),
       this.getTokenMeta(debtTokenAddress),
     ]);
 
-    // col and debt from the resolver are already underlying (actual) amounts
-    const actualCol = pos.col;
-    const actualDebt = pos.debt;
-
-    const colAmountStr = formatUnits(actualCol, colMeta.decimals);
-    const debtAmountStr = formatUnits(actualDebt, debtMeta.decimals);
+    // col and debt from getPositionsForNftIds are already underlying (actual) amounts
+    const colAmountStr = formatUnits(pos.col, colMeta.decimals);
+    const debtAmountStr = formatUnits(pos.debt, debtMeta.decimals);
 
     const colAmount = parseFloat(colAmountStr);
     const debtAmount = parseFloat(debtAmountStr);
@@ -301,12 +334,10 @@ export class FluidService {
     const collateralFactor = configToDecimal(vaultData.configs.collateralFactor);
 
     const healthFactor = computeHealthFactor(
-      actualCol,
-      actualDebt,
+      pos.col,
+      pos.debt,
       vaultData.configs.oraclePriceOperate,
       liquidationThreshold,
-      colMeta.decimals,
-      debtMeta.decimals,
     );
 
     const supplyAPY = rateToDecimal(vaultData.exchangePricesAndRates.supplyRateVault);
@@ -326,7 +357,7 @@ export class FluidService {
         token: colMeta.symbol,
         tokenAddress: colTokenAddress,
         decimals: colMeta.decimals,
-        amountRaw: actualCol.toString(),
+        amountRaw: pos.col.toString(),
         amount: colAmountStr,
         valueUSD: colValueUSD,
       },
@@ -334,7 +365,7 @@ export class FluidService {
         token: debtMeta.symbol,
         tokenAddress: debtTokenAddress,
         decimals: debtMeta.decimals,
-        amountRaw: actualDebt.toString(),
+        amountRaw: pos.debt.toString(),
         amount: debtAmountStr,
         valueUSD: debtValueUSD,
       },
@@ -365,7 +396,7 @@ export class FluidService {
       case 'btc':
       case 'wbtc': return prices.BTC_USD;
       default:
-        console.warn(`[FluidService] Unknown token symbol: ${symbol}, price defaulting to 0`);
+        console.warn(`[FluidService] unknown token symbol: ${symbol}, price 0`);
         return 0;
     }
   }
@@ -404,17 +435,18 @@ export class FluidService {
   }
 
   private buildEmptyResponse(address: Address, prices: Prices | null): PositionResponse {
+    const withPrices = prices !== null;
     return {
       address,
       chain: 'base',
       timestamp: new Date().toISOString(),
       positions: [],
       summary: {
-        totalCollateralUSD: 0,
-        totalDebtUSD: 0,
-        totalNetValueUSD: 0,
-        totalNetValueETH: 0,
-        totalNetValueBTC: 0,
+        totalCollateralUSD: withPrices ? 0 : null,
+        totalDebtUSD: withPrices ? 0 : null,
+        totalNetValueUSD: withPrices ? 0 : null,
+        totalNetValueETH: withPrices ? 0 : null,
+        totalNetValueBTC: withPrices ? 0 : null,
         weightedSupplyAPY: 0,
         weightedBorrowAPY: 0,
       },

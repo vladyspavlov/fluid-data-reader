@@ -155,9 +155,7 @@
               { "internalType": "uint256", "name": "expandDuration", "type": "uint256" },
               { "internalType": "uint256", "name": "baseWithdrawalLimit", "type": "uint256" },
               { "internalType": "uint256", "name": "withdrawableUntilLimit", "type": "uint256" },
-              { "internalType": "uint256", "name": "withdrawable", "type": "uint256" },
-              { "internalType": "uint256", "name": "decayEndTimestamp", "type": "uint256" },
-              { "internalType": "uint256", "name": "decayAmount", "type": "uint256" }
+              { "internalType": "uint256", "name": "withdrawable", "type": "uint256" }
             ],
             "internalType": "struct Structs.UserSupplyData",
             "name": "liquidityUserSupplyData",

@@ -1,17 +1,15 @@
 import { formatUnits } from 'viem';
 
-const EXCHANGE_PRICE_PRECISION = BigInt(1e12);
-// Fluid stores rates as annualized * 1e6 (e.g. 8500 = 0.85%, 850000 = 85%)
-// Verify with first real eth_call by logging raw values
-const RATE_PRECISION = 1_000_000;
-// Fluid configs (collateralFactor, liquidationThreshold) are in basis points (10000 = 100%)
-const CONFIG_PRECISION = 10_000;
-// Oracle price from getVaultEntireData.configs.oraclePriceOperate is col/debt in 1e27 precision
-const ORACLE_PRECISION = BigInt(1e27);
+// Fluid oracle price: price of 1 unit of collateral expressed in debt token units, scaled by 1e27.
+// The oracle already accounts for the decimal difference between collateral and debt tokens.
+const ORACLE_PRECISION = 10n ** 27n;
 
-export function rawToActual(raw: bigint, exchangePrice: bigint): bigint {
-  return (raw * exchangePrice) / EXCHANGE_PRICE_PRECISION;
-}
+// Fluid stores annualized rates as integer * 10000 (e.g. 659 = 6.59%)
+// Verified from on-chain data: borrowRateVault=659 matches UI's 6.59% borrow APY.
+const RATE_PRECISION = 10_000;
+
+// Fluid configs (collateralFactor, liquidationThreshold) are uint16 in basis points (10000 = 100%)
+const CONFIG_PRECISION = 10_000;
 
 export function formatAmount(raw: bigint, decimals: number): string {
   return formatUnits(raw, decimals);
@@ -21,7 +19,6 @@ export function rateToDecimal(rawRate: bigint | number): number {
   return Number(rawRate) / RATE_PRECISION;
 }
 
-// configValue is uint16 in basis points (10000 = 100%)
 export function configToDecimal(configValue: number): number {
   return configValue / CONFIG_PRECISION;
 }
@@ -31,27 +28,18 @@ export function computeHealthFactor(
   debtUnderlying: bigint,
   oraclePriceOperate: bigint,
   liquidationThreshold: number,
-  colDecimals: number,
-  debtDecimals: number,
 ): number {
   if (debtUnderlying === 0n) return Infinity;
 
-  // Scale everything to a common 1e18 base for safe BigInt division
-  const SCALE = BigInt(1e18);
-  const ltScaled = BigInt(Math.round(liquidationThreshold * 1e6));
+  // Oracle price already converts col units → debt units at 1e27 scale.
+  // No additional decimal adjustment needed.
+  const colValueInDebt = (colUnderlying * oraclePriceOperate) / ORACLE_PRECISION;
 
-  // colValueInDebt (debt token terms) = colUnderlying * oraclePrice / 1e27 adjusted for decimals
-  // oraclePriceOperate = price of 1 col unit (in debt units) * 1e27
-  // We need: colValueInDebt in debtDecimals units
-  // Formula: colUnderlying * oraclePriceOperate / 1e27 * 10^debtDecimals / 10^colDecimals
+  if (colValueInDebt === 0n) return 0;
 
-  const decimalAdjust = BigInt(10 ** debtDecimals) * SCALE / BigInt(10 ** colDecimals);
-  const colValueInDebt = (colUnderlying * oraclePriceOperate * decimalAdjust) / ORACLE_PRECISION / SCALE;
+  const SCALE = 1_000_000n;
+  const ltScaled = BigInt(Math.round(liquidationThreshold * Number(SCALE)));
 
-  const hfNumerator = colValueInDebt * ltScaled;
-  const hfDenominator = debtUnderlying * BigInt(1e6);
-
-  if (hfDenominator === 0n) return Infinity;
-
-  return Number(hfNumerator * SCALE / hfDenominator) / Number(SCALE);
+  const hfScaled = (colValueInDebt * ltScaled) / debtUnderlying;
+  return Number(hfScaled) / Number(SCALE);
 }
